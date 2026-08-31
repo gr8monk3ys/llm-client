@@ -572,11 +572,17 @@ class OllamaProvider(Provider):
 
     @classmethod
     def available(cls) -> bool:
-        """Ollama has no key to check, so ask the server whether it is up."""
+        """Ollama has no key to check, so ask the server whether it is up.
+
+        A probe must answer, never raise: callers use it to pick a provider,
+        and a DNS failure or a proxy misconfiguration is an unavailable
+        provider, not an error to propagate.
+        """
         base = (os.getenv("OLLAMA_BASE_URL") or cls.default_base_url or "").rstrip("/")
         try:
             return httpx.get(f"{base}/api/tags", timeout=2.0).status_code == 200
-        except httpx.HTTPError:
+        except Exception as exc:
+            logger.debug("ollama availability probe failed: %s", exc)
             return False
 
     def _request(

@@ -15,7 +15,7 @@ behind it.
 ## Install
 
 ```bash
-pip install "llm-client[all] @ git+https://github.com/gr8monk3ys/llm-client@v0.1.0"
+pip install "llm-client[all] @ git+https://github.com/gr8monk3ys/llm-client@v0.1.1"
 ```
 
 Provider SDKs are optional extras — take only what you use:

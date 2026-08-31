@@ -202,3 +202,31 @@ class TestMissingSDK:
 
     def test_providers_without_an_sdk_still_work(self, no_sdks):
         assert LLMClient("mock").complete("hi").text.startswith("Mock response")
+
+
+class TestAvailabilityProbe:
+    """A probe answers; it never raises. Callers use it to pick a provider."""
+
+    def test_ollama_probe_survives_a_non_httpx_failure(self, monkeypatch):
+        from llm_client import provider_available
+
+        def boom(*args, **kwargs):
+            raise Exception("Connection refused")
+
+        monkeypatch.setattr(httpx, "get", boom)
+        assert provider_available("ollama") is False
+
+    def test_ollama_probe_survives_an_httpx_failure(self, monkeypatch):
+        from llm_client import provider_available
+
+        def boom(*args, **kwargs):
+            raise httpx.ConnectError("refused")
+
+        monkeypatch.setattr(httpx, "get", boom)
+        assert provider_available("ollama") is False
+
+    def test_ollama_probe_reports_a_live_server(self, monkeypatch):
+        from llm_client import provider_available
+
+        monkeypatch.setattr(httpx, "get", lambda *a, **k: httpx.Response(200))
+        assert provider_available("ollama") is True
