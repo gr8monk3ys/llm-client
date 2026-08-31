@@ -9,7 +9,12 @@ from typing import Any
 from .cache import DEFAULT_MAXSIZE, DEFAULT_TTL, ResponseCache
 from .errors import LLMConfigurationError
 from .providers import Provider, get_provider_class
-from .retry import DEFAULT_INITIAL_DELAY, DEFAULT_MAX_DELAY, build_retry
+from .retry import (
+    DEFAULT_EXP_BASE,
+    DEFAULT_INITIAL_DELAY,
+    DEFAULT_MAX_DELAY,
+    build_retry,
+)
 from .types import Completion, Message, Usage, normalize_messages
 
 __all__ = ["LLMClient"]
@@ -45,6 +50,7 @@ class LLMClient:
         cache_maxsize: int = DEFAULT_MAXSIZE,
         retry_initial_delay: float = DEFAULT_INITIAL_DELAY,
         retry_max_delay: float = DEFAULT_MAX_DELAY,
+        retry_exp_base: float = DEFAULT_EXP_BASE,
     ):
         provider_name = (provider or os.getenv("LLM_PROVIDER") or DEFAULT_PROVIDER).strip().lower()
         provider_cls = get_provider_class(provider_name)
@@ -55,7 +61,7 @@ class LLMClient:
             base_url=base_url,
             timeout=timeout,
         )
-        self._retry = build_retry(max_retries, retry_initial_delay, retry_max_delay)
+        self._retry = build_retry(max_retries, retry_initial_delay, retry_max_delay, retry_exp_base)
         self._cache = ResponseCache(maxsize=cache_maxsize, ttl=cache_ttl) if cache else None
         self.max_retries = max_retries
 

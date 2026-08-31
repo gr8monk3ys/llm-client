@@ -15,7 +15,7 @@ behind it.
 ## Install
 
 ```bash
-pip install "llm-client[all] @ git+https://github.com/gr8monk3ys/llm-client@v0.1.1"
+pip install "llm-client[all] @ git+https://github.com/gr8monk3ys/llm-client@v0.1.2"
 ```
 
 Provider SDKs are optional extras — take only what you use:
@@ -67,10 +67,17 @@ they share one adapter and one dependency; `base_url` is the only difference.
 
 For Anthropic, `claude-sonnet-5` is the default and `ANTHROPIC_MOST_CAPABLE_MODEL`
 (`claude-fable-5`) names the model to reach for when capability matters more
-than cost. **`temperature` is ignored on Anthropic**: the Messages API removed
-sampling parameters, and the SDK removed `temperature` from `messages.create()`
-along with them, so forwarding one raises `TypeError` rather than producing a
-different answer. Other providers take it as normal. Every other provider's default is inherited from the projects this
+than cost.
+
+**`temperature` on Anthropic depends on the model.** Sampling was removed from
+particular models, not from the Messages API. Opus 4.6, Sonnet 4.6, Sonnet 4.5,
+Haiku 4.5 and older still honour it, and this package forwards it (through
+`extra_body`, because the SDK dropped `temperature` from `messages.create()`'s
+signature when the newer models lost it). Fable 5, Mythos 5, Opus 5, Opus 4.8,
+Opus 4.7 and Sonnet 5 reject it with an HTTP 400, so it is dropped and a
+`UserWarning` is raised once per client. `anthropic_accepts_sampling(model)`
+answers the question directly, and `SAMPLING_REMOVED_PREFIXES` is the list.
+Every other provider takes `temperature` as normal. Every other provider's default is inherited from the projects this
 package was extracted from and may be behind that vendor's current line — set
 `LLM_MODEL` or pass `model=` rather than relying on it.
 
@@ -85,10 +92,17 @@ to `openai`.
 ## Retry
 
 `max_retries` (default 3) retries with exponential backoff and jitter on rate
-limits, 5xx, timeouts and connection failures. It never retries a 4xx — a bad
-key or a malformed request fails identically on every attempt, and retrying one
-only spends the rate limit. Provider SDKs are constructed with their own
-retries disabled so the two policies cannot multiply.
+limits, 5xx (529 included — Anthropic's "overloaded" is a back-off signal),
+timeouts and connection failures. Tune the curve with `retry_initial_delay`,
+`retry_max_delay` and `retry_exp_base`. Provider SDKs are constructed with
+their own retries disabled so the two policies cannot multiply.
+
+**Only known-transient failures are retried.** A 4xx is not: a bad key or a
+malformed request fails identically every time, and retrying one only spends
+the rate limit. Neither is anything unclassified — an exception carrying no
+HTTP status is a bug, here or in an SDK, and retrying a `KeyError` four times
+turns one clear failure into a slow one. `LLMProviderError` therefore defaults
+to `retryable=False`; something must be *known* to be transient to repeat.
 
 Every failure arrives as one of these, whatever SDK raised it:
 

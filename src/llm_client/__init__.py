@@ -25,14 +25,16 @@ from .errors import (
 from .providers import (
     ANTHROPIC_MOST_CAPABLE_MODEL,
     PROVIDERS,
+    SAMPLING_REMOVED_PREFIXES,
     Provider,
+    anthropic_accepts_sampling,
     available_providers,
     get_provider_class,
     provider_available,
 )
 from .types import Completion, Message, Usage
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "LLMClient",
@@ -45,6 +47,8 @@ __all__ = [
     "available_providers",
     "provider_available",
     "ANTHROPIC_MOST_CAPABLE_MODEL",
+    "SAMPLING_REMOVED_PREFIXES",
+    "anthropic_accepts_sampling",
     "ResponseCache",
     "LLMError",
     "LLMConfigurationError",

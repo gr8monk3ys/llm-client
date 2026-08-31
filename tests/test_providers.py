@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import httpx
 import pytest
 from conftest import anthropic_response
@@ -69,12 +71,65 @@ class TestAnthropic:
         LLMClient("anthropic").complete("hi")
         assert fake_anthropic.last["max_tokens"] == 4096
 
-    def test_temperature_is_never_forwarded(self, fake_anthropic):
-        """The Messages API takes no sampling parameters, and the SDK removed
-        ``temperature`` from ``create()`` - forwarding one is a TypeError."""
-        for model in ("claude-sonnet-5", "claude-haiku-4-5"):
+    @pytest.mark.parametrize("model", ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"])
+    def test_temperature_reaches_models_that_accept_it(self, fake_anthropic, model):
+        """Sampling was removed from particular models, not from the API.
+
+        The SDK dropped ``temperature`` from ``create()``'s signature, so it
+        travels in ``extra_body`` rather than as a named argument.
+        """
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # a warning here would be wrong
             LLMClient("anthropic", model).complete("hi", temperature=0.7)
-            assert "temperature" not in fake_anthropic.last
+        assert fake_anthropic.last["extra_body"] == {"temperature": 0.7}
+        assert "temperature" not in fake_anthropic.last
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-fable-5",
+            "claude-mythos-5",
+            "claude-opus-5-20260101",  # dated snapshots match by prefix
+        ],
+    )
+    def test_temperature_is_dropped_where_it_would_be_a_400(self, fake_anthropic, model):
+        with pytest.warns(UserWarning, match="rejects sampling parameters"):
+            LLMClient("anthropic", model).complete("hi", temperature=0.7)
+        assert "extra_body" not in fake_anthropic.last
+        assert "temperature" not in fake_anthropic.last
+
+    def test_dropping_temperature_warns_once_per_client(self, fake_anthropic):
+        """Loud enough to notice, quiet enough not to be filtered out."""
+        client = LLMClient("anthropic", "claude-sonnet-5")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            for _ in range(5):
+                client.complete("hi", temperature=0.7)
+        assert len(caught) == 1
+
+        # ...but a fresh client says it again.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            LLMClient("anthropic", "claude-sonnet-5").complete("hi", temperature=0.7)
+        assert len(caught) == 1
+
+    def test_no_temperature_means_no_extra_body_and_no_warning(self, fake_anthropic):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            LLMClient("anthropic", "claude-sonnet-5").complete("hi")
+        assert "extra_body" not in fake_anthropic.last
+
+    def test_the_sampling_predicate_is_public(self):
+        from llm_client import anthropic_accepts_sampling
+
+        assert anthropic_accepts_sampling("claude-haiku-4-5") is True
+        assert anthropic_accepts_sampling("claude-sonnet-4-6") is True
+        assert anthropic_accepts_sampling("claude-sonnet-5") is False
+        assert anthropic_accepts_sampling("claude-opus-4-8") is False
 
     def test_json_mode_is_an_instruction_because_there_is_no_native_flag(self, fake_anthropic):
         LLMClient("anthropic").complete("hi", json_mode=True)

@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any, ClassVar
@@ -42,6 +43,26 @@ logger = logging.getLogger(__name__)
 #: The Anthropic model to reach for when capability matters more than cost.
 ANTHROPIC_MOST_CAPABLE_MODEL = "claude-fable-5"
 
+#: Anthropic model-id prefixes whose models reject sampling parameters with an
+#: HTTP 400. Sampling was removed from these models, not from the Messages API:
+#: Opus 4.6, Sonnet 4.6, Sonnet 4.5, Haiku 4.5 and older still honour
+#: ``temperature``. Prefixes, so dated snapshots (``claude-opus-5-20260101``)
+#: match too.
+SAMPLING_REMOVED_PREFIXES = (
+    "claude-fable-5",
+    "claude-mythos-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-sonnet-5",
+)
+
+
+def anthropic_accepts_sampling(model: str) -> bool:
+    """Whether ``model`` still honours ``temperature``."""
+    return not model.startswith(SAMPLING_REMOVED_PREFIXES)
+
+
 _JSON_INSTRUCTION = (
     "Respond with a single valid JSON value and nothing else. "
     "Do not wrap it in markdown fences or add commentary."
@@ -60,14 +81,23 @@ def _import_sdk(module: str, extra: str) -> Any:
 
 
 def _classify_by_status(exc: Exception, provider: str, status: int | None) -> LLMProviderError:
-    """Map an HTTP status onto the exception hierarchy."""
+    """Map an HTTP status onto the exception hierarchy.
+
+    An exception carrying no status is not an HTTP failure at all - it is a
+    bug, here or in the SDK - so it is not retried. An unrecognised 5xx is;
+    an unrecognised 4xx is not.
+    """
     if status == 429:
         return LLMRateLimitError(f"{provider} rate limit exceeded: {exc}")
     if status is not None and status in RETRYABLE_STATUS_CODES:
         return LLMServerError(f"{provider} server error: {exc}", status_code=status)
     if status is not None and status in CLIENT_ERROR_STATUS_CODES:
         return LLMClientError(f"{provider} client error: {exc}", status_code=status)
-    return LLMProviderError(f"{provider} error: {exc}", status_code=status)
+    return LLMProviderError(
+        f"{provider} error: {exc}",
+        status_code=status,
+        retryable=status is not None and status >= 500,
+    )
 
 
 def _classify_httpx(exc: Exception, provider: str) -> LLMProviderError | None:
@@ -327,6 +357,26 @@ class AnthropicProvider(Provider):
     #: Anthropic requires max_tokens; this is the fallback when none is given.
     default_max_tokens: ClassVar[int] = 4096
 
+    def __init__(self, model: str, **kwargs: Any):
+        super().__init__(model, **kwargs)
+        self._sampling_warned = False
+
+    def _drop_temperature(self, temperature: float) -> None:
+        """Say so, once, when a model cannot take the temperature it was given.
+
+        Once per client: a warning on every call in a loop is noise the caller
+        learns to filter, and silence is how the old behaviour hid.
+        """
+        if self._sampling_warned:
+            return
+        self._sampling_warned = True
+        warnings.warn(
+            f"temperature={temperature} ignored: {self.model} rejects sampling "
+            "parameters (HTTP 400). Use a model that still accepts temperature, "
+            "or drop the argument.",
+            stacklevel=4,
+        )
+
     def _client(self, is_async: bool) -> Any:
         anthropic = _import_sdk("anthropic", self.sdk_extra)
         factory = anthropic.AsyncAnthropic if is_async else anthropic.Anthropic
@@ -367,13 +417,13 @@ class AnthropicProvider(Provider):
         if system_parts:
             kwargs["system"] = "\n\n".join(system_parts)
         if temperature is not None:
-            # Not a bug: the Messages API removed sampling parameters, and the
-            # anthropic SDK dropped `temperature` from create() with them, so
-            # forwarding one is a TypeError rather than a weaker answer.
-            logger.debug(
-                "ignoring temperature=%s: the Anthropic Messages API takes no sampling parameters",
-                temperature,
-            )
+            if anthropic_accepts_sampling(self.model):
+                # The SDK removed `temperature` from create()'s signature when
+                # the current models lost sampling, so passing it by name is a
+                # TypeError. Older models still honour it over the wire.
+                kwargs["extra_body"] = {"temperature": temperature}
+            else:
+                self._drop_temperature(temperature)
         return kwargs
 
     def _completion(self, response: Any) -> Completion:

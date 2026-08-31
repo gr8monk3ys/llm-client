@@ -19,18 +19,25 @@ from tenacity import (
 
 from .errors import is_retryable
 
-__all__ = ["build_retry", "DEFAULT_INITIAL_DELAY", "DEFAULT_MAX_DELAY"]
+__all__ = [
+    "build_retry",
+    "DEFAULT_INITIAL_DELAY",
+    "DEFAULT_MAX_DELAY",
+    "DEFAULT_EXP_BASE",
+]
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_INITIAL_DELAY = 1.0
 DEFAULT_MAX_DELAY = 30.0
+DEFAULT_EXP_BASE = 2.0
 
 
 def build_retry(
     max_retries: int,
     initial_delay: float = DEFAULT_INITIAL_DELAY,
     max_delay: float = DEFAULT_MAX_DELAY,
+    exp_base: float = DEFAULT_EXP_BASE,
 ) -> Any:
     """Build a tenacity decorator that retries only retryable failures.
 
@@ -44,7 +51,7 @@ def build_retry(
     return retry(
         retry=retry_if_exception(is_retryable),
         stop=stop_after_attempt(max_retries + 1),
-        wait=wait_exponential_jitter(initial=initial_delay, max=max_delay),
+        wait=wait_exponential_jitter(initial=initial_delay, max=max_delay, exp_base=exp_base),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )

@@ -37,9 +37,14 @@ class LLMProviderError(LLMError):
 
     ``retryable`` is the single source of truth for the retry policy; the
     subclasses below only exist to set it (and ``status_code``) correctly.
+
+    It defaults to ``False``. Retrying is the dangerous default: a bug inside
+    a provider - a ``KeyError`` on an unexpected response shape - is not
+    flaky, and retrying it four times only turns one clear failure into a
+    slow one. Something must be *known* to be transient to be retried.
     """
 
-    def __init__(self, message: str, status_code: int | None = None, retryable: bool = True):
+    def __init__(self, message: str, status_code: int | None = None, retryable: bool = False):
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
@@ -84,8 +89,9 @@ class LLMClientError(LLMProviderError):
         super().__init__(message, status_code=status_code, retryable=False)
 
 
-#: Statuses worth trying again.
-RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+#: Statuses worth trying again. 529 is Anthropic's "overloaded", which is
+#: explicitly a back-off-and-retry signal.
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504, 529})
 
 #: Statuses that will fail identically on every attempt.
 CLIENT_ERROR_STATUS_CODES = frozenset({400, 401, 403, 404, 405, 422})

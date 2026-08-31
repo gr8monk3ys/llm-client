@@ -9,6 +9,7 @@ from llm_client import (
     LLMClient,
     LLMClientError,
     LLMConnectionError,
+    LLMProviderError,
     LLMRateLimitError,
     LLMServerError,
     LLMTimeoutError,
@@ -126,3 +127,78 @@ class TestAsyncRetry:
         fake_openai.fail_times(1, sdk.InternalServerError("boom"))
         assert (await LLMClient("openai").acomplete("hi")).text == "hi"
         assert fake_openai.call_count == 2
+
+
+class TestUnclassifiedFailures:
+    """Retrying is the dangerous default: only known-transient failures repeat."""
+
+    def test_a_bug_inside_a_provider_is_not_retried(self, fake_openai, monkeypatch):
+        def broken(*args, **kwargs):
+            raise KeyError("unexpected response shape")
+
+        monkeypatch.setattr("llm_client.providers._OpenAICompatible._completion", broken)
+        with pytest.raises(Exception) as excinfo:
+            LLMClient("openai").complete("hi")
+        assert isinstance(excinfo.value, KeyError)
+        assert fake_openai.call_count == 1
+
+    def test_an_error_with_no_status_is_not_retried(self, fake_openai):
+        sdk = _errors(fake_openai)
+        fake_openai.fail_times(5, sdk.APIError("something odd"))
+        with pytest.raises(LLMProviderError):
+            LLMClient("openai").complete("hi")
+        assert fake_openai.call_count == 1
+
+    def test_an_unrecognised_5xx_is_retried(self, fake_openai):
+        sdk = _errors(fake_openai)
+        error = sdk.APIError("teapot on fire")
+        error.status_code = 507
+        fake_openai.fail_times(1, error)
+        LLMClient("openai").complete("hi")
+        assert fake_openai.call_count == 2
+
+    def test_an_unrecognised_4xx_is_not_retried(self, fake_openai):
+        sdk = _errors(fake_openai)
+        error = sdk.APIError("gone")
+        error.status_code = 410
+        fake_openai.fail_times(5, error)
+        with pytest.raises(LLMProviderError):
+            LLMClient("openai").complete("hi")
+        assert fake_openai.call_count == 1
+
+    def test_529_overloaded_is_retried(self, fake_anthropic):
+        import sys
+
+        sdk = sys.modules["anthropic"]
+        error = sdk.APIError("overloaded")
+        error.status_code = 529
+        fake_anthropic.fail_times(1, error)
+        assert LLMClient("anthropic").complete("hi").text == "hi"
+        assert fake_anthropic.call_count == 2
+
+    def test_a_bare_provider_error_is_not_retryable_by_default(self):
+        assert is_retryable(LLMProviderError("who knows")) is False
+        assert is_retryable(LLMProviderError("known bad", retryable=True)) is True
+
+
+class TestBackoffShape:
+    def test_the_exponential_base_is_configurable(self, monkeypatch):
+        """resume-AI exposes llm_retry_exponential_base; it has to reach tenacity."""
+        captured = {}
+        import llm_client.retry as retry_module
+
+        real = retry_module.wait_exponential_jitter
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return real(**kwargs)
+
+        monkeypatch.setattr(retry_module, "wait_exponential_jitter", spy)
+        LLMClient(
+            "mock",
+            max_retries=4,
+            retry_initial_delay=0.5,
+            retry_max_delay=12.0,
+            retry_exp_base=3.0,
+        )
+        assert captured == {"initial": 0.5, "max": 12.0, "exp_base": 3.0}
