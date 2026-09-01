@@ -1,0 +1,157 @@
+# Consumer smoke: does this working tree still work in the apps that use it?
+#
+# The apps consume this package by pinned git tag, and their own CI is mostly
+# dead (private repos share an exhausted Actions quota), so a bad release here
+# breaks them silently and nothing goes red. This repo is public, where Actions
+# minutes are free — so the check runs here: clone each PUBLIC consumer, install
+# its dependencies exactly as its own CI does, force THIS working tree over the
+# pinned release, and run the consumer's suite.
+#
+# Private consumers are deliberately not in the matrix: `actions/checkout`
+# cannot read a private repo with the default GITHUB_TOKEN, and a cross-repo PAT
+# does not belong in a public repo's workflow. Only public consumers are listed
+# below. `resume-AI` exercises the whole interface — providers, retry, the TTL
+# cache and the exception hierarchy — through `app/services/llm_service.py`.
+#
+# timeout-minutes is set from a measured run (3m22s on 2026-09-01), not guessed.
+
+name: Consumer smoke
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      consumer_ref:
+        description: "Consumer branch/tag/SHA to test against. Empty = the consumer's default branch."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  # consumer_ref is part of the key on purpose: dispatching an adoption branch
+  # must not cancel a run already testing the consumer's default branch.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.consumer_ref || 'default' }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: ${{ matrix.repo }}@${{ inputs.consumer_ref || matrix.ref_default }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # A matrix row is a complete description of one consumer: where it
+          # lives, how IT installs (mirrored from its own CI, not invented
+          # here), and what IT calls a test run.
+          - repo: gr8monk3ys/resume-AI
+            path: backend
+            ref_default: main
+            python: "3.11"
+            install: uv
+            install_cmd: uv sync --frozen --group dev
+            # .venv/bin/python, NOT `uv run`: `uv run` re-syncs the environment
+            # before running and would silently reinstall the git-pinned
+            # release over the working tree this job just forced in.
+            test_cmd: >-
+              env LLM_PROVIDER=mock TESTING=true DATABASE_URL=sqlite:///:memory:
+              .venv/bin/python -m pytest tests/ -q -p no:cacheprovider
+    env:
+      DEP_NAME: llm-client
+      IMPORT_NAME: llm_client
+      UV_PYTHON: ${{ matrix.python }}
+
+    steps:
+      - name: Check out the package under test
+        uses: actions/checkout@v4
+        with:
+          path: package
+
+      - name: Check out the consumer
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ inputs.consumer_ref || matrix.ref_default }}
+          path: consumer
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install uv
+        if: matrix.install == 'uv'
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Does this consumer ref declare the dependency?
+        id: declares
+        working-directory: consumer/${{ matrix.path }}
+        run: |
+          set -euo pipefail
+          declared=false
+          for f in pyproject.toml uv.lock poetry.lock requirements.txt requirements-dev.txt; do
+            [ -f "$f" ] || continue
+            if grep -qF "$DEP_NAME" "$f"; then
+              declared=true
+              echo "found '$DEP_NAME' in $f"
+              break
+            fi
+          done
+          echo "declared=$declared" >> "$GITHUB_OUTPUT"
+          if [ "$declared" = false ]; then
+            echo "::notice title=Consumer smoke skipped::${{ matrix.repo }}@${{ inputs.consumer_ref || matrix.ref_default }} does not declare '$DEP_NAME' — dependency not declared yet, skipped. This is the expected state until the adoption PR merges, and it is not a failure."
+          fi
+
+      - name: Install the consumer's dependencies
+        if: steps.declares.outputs.declared == 'true'
+        working-directory: consumer/${{ matrix.path }}
+        run: ${{ matrix.install_cmd }}
+
+      - name: Force this working tree over the pinned release
+        if: steps.declares.outputs.declared == 'true'
+        working-directory: consumer/${{ matrix.path }}
+        run: |
+          set -euo pipefail
+          # Editable on purpose: a wheel install lands in site-packages and is
+          # then indistinguishable by path from the git-pinned release, so the
+          # assertion below could not tell them apart.
+          # --no-deps on purpose: the consumer's own resolution stands, and
+          # exactly one distribution is swapped.
+          case "${{ matrix.install }}" in
+            uv)  uv pip install --python .venv/bin/python --force-reinstall --no-deps -e "$GITHUB_WORKSPACE/package" ;;
+            pip) pip install --force-reinstall --no-deps -e "$GITHUB_WORKSPACE/package" ;;
+            *)   echo "unknown install method '${{ matrix.install }}'" >&2; exit 1 ;;
+          esac
+
+      - name: Assert the consumer imports THIS tree, not the pinned release
+        if: steps.declares.outputs.declared == 'true'
+        working-directory: consumer/${{ matrix.path }}
+        run: |
+          set -euo pipefail
+          case "${{ matrix.install }}" in
+            uv)  PY=.venv/bin/python ;;
+            pip) PY=python ;;
+          esac
+          "$PY" - <<'PYCODE'
+          import importlib, os, sys
+
+          name = os.environ["IMPORT_NAME"]
+          path = os.path.realpath(importlib.import_module(name).__file__)
+          want = os.path.realpath(os.path.join(os.environ["GITHUB_WORKSPACE"], "package"))
+          print(f"{name}.__file__   = {path}")
+          print(f"must live under   = {want}")
+          if not path.startswith(want + os.sep):
+              sys.exit("FAIL: the consumer is importing the pinned release, not the package under test")
+          print("OK: the consumer is importing the package under test")
+          PYCODE
+
+      - name: Run the consumer's test suite
+        if: steps.declares.outputs.declared == 'true'
+        working-directory: consumer/${{ matrix.path }}
+        run: ${{ matrix.test_cmd }}
