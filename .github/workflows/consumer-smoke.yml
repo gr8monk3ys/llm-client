@@ -61,7 +61,15 @@ jobs:
             test_cmd: >-
               env LLM_PROVIDER=mock TESTING=true DATABASE_URL=sqlite:///:memory:
               .venv/bin/python -m pytest tests/ -q -p no:cacheprovider
+    # Only literals from THIS file are interpolated into a `run:` body, and only
+    # where they are the command itself (`install_cmd` / `test_cmd`). The one
+    # caller-supplied value — `inputs.consumer_ref` from workflow_dispatch —
+    # reaches the shell exclusively through CONSUMER_REF below, so a crafted ref
+    # cannot break out of the string and run as script.
     env:
+      CONSUMER_REPO: ${{ matrix.repo }}
+      CONSUMER_REF: ${{ inputs.consumer_ref || matrix.ref_default }}
+      INSTALL: ${{ matrix.install }}
       DEP_NAME: llm-client
       IMPORT_NAME: llm_client
       UV_PYTHON: ${{ matrix.python }}
@@ -75,8 +83,8 @@ jobs:
       - name: Check out the consumer
         uses: actions/checkout@v4
         with:
-          repository: ${{ matrix.repo }}
-          ref: ${{ inputs.consumer_ref || matrix.ref_default }}
+          repository: ${{ env.CONSUMER_REPO }}
+          ref: ${{ env.CONSUMER_REF }}
           path: consumer
 
       - uses: actions/setup-python@v5
@@ -105,7 +113,7 @@ jobs:
           done
           echo "declared=$declared" >> "$GITHUB_OUTPUT"
           if [ "$declared" = false ]; then
-            echo "::notice title=Consumer smoke skipped::${{ matrix.repo }}@${{ inputs.consumer_ref || matrix.ref_default }} does not declare '$DEP_NAME' — dependency not declared yet, skipped. This is the expected state until the adoption PR merges, and it is not a failure."
+            echo "::notice title=Consumer smoke skipped::$CONSUMER_REPO@$CONSUMER_REF does not declare '$DEP_NAME' — dependency not declared yet, skipped. This is the expected state until the adoption PR merges, and it is not a failure."
           fi
 
       - name: Install the consumer's dependencies
@@ -122,11 +130,14 @@ jobs:
           # then indistinguishable by path from the git-pinned release, so the
           # assertion below could not tell them apart.
           # --no-deps on purpose: the consumer's own resolution stands, and
-          # exactly one distribution is swapped.
-          case "${{ matrix.install }}" in
+          # exactly one distribution is swapped. The cost is that this smoke
+          # does NOT validate the package's own declared constraints — a
+          # tightened or newly added requirement here passes the smoke and
+          # still breaks the consumer on its next re-lock.
+          case "$INSTALL" in
             uv)  uv pip install --python .venv/bin/python --force-reinstall --no-deps -e "$GITHUB_WORKSPACE/package" ;;
             pip) pip install --force-reinstall --no-deps -e "$GITHUB_WORKSPACE/package" ;;
-            *)   echo "unknown install method '${{ matrix.install }}'" >&2; exit 1 ;;
+            *)   echo "unknown install method '$INSTALL'" >&2; exit 1 ;;
           esac
 
       - name: Assert the consumer imports THIS tree, not the pinned release
@@ -134,7 +145,7 @@ jobs:
         working-directory: consumer/${{ matrix.path }}
         run: |
           set -euo pipefail
-          case "${{ matrix.install }}" in
+          case "$INSTALL" in
             uv)  PY=.venv/bin/python ;;
             pip) PY=python ;;
           esac
