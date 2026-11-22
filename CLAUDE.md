@@ -1,3 +1,7 @@
+## Checks
+
+`make check` runs lint, format check and tests (the same steps as `.github/workflows/ci.yml`). Pre-commit hooks (`pre-commit install`) run ruff on staged files.
+
 ## Agent skills
 
 ### Issue tracker
